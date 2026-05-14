@@ -25,12 +25,20 @@ import (
 	datav1alpha1 "github.com/fluid-cloudnative/fluid/api/v1alpha1"
 	"github.com/fluid-cloudnative/fluid/pkg/common"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // Constants for test values used multiple times
 const (
 	testJnifuseKey           = "alluxio.fuse.jnifuse.enabled"
+	testLibfuseVersionKey    = "alluxio.fuse.jnifuse.libfuse.version"
+	testS3ThreadsMaxKey      = "alluxio.underfs.s3.threads.max"
+	testWorkerClientPoolKey  = "alluxio.user.block.worker.client.pool.max"
 	testBlockSizeKey         = "alluxio.user.block.size.bytes.default"
+	testStreamingChunkKey    = "alluxio.user.streaming.reader.chunk.size.bytes"
+	testLocalChunkKey        = "alluxio.user.local.reader.chunk.size.bytes"
+	testWorkerReaderKey      = "alluxio.worker.network.reader.buffer.size"
+	testDirectMemoryIOKey    = "alluxio.user.direct.memory.io.enabled"
 	testMasterRpcPortKey     = "alluxio.master.rpc.port"
 	testMasterWebPortKey     = "alluxio.master.web.port"
 	testWorkerRpcPortKey     = "alluxio.worker.rpc.port"
@@ -122,6 +130,202 @@ var _ = Describe("AlluxioEngine Transform Optimization Tests", Label("pkg.ddc.al
 				engine.optimizeDefaultPropertiesAndFuseForHTTP(runtime, dataset, alluxioValue)
 
 				Expect(alluxioValue.Properties[testBlockSizeKey]).To(Equal(testExpectedBlockSize))
+			})
+		})
+	})
+
+	Describe("optimizeDefaultPropertiesForHighConcurrencyS3", func() {
+		Context("when the high concurrency profile is enabled on an S3 dataset", func() {
+			It("should set the JNR/libfuse2 and S3 concurrency defaults", func() {
+				runtime := &datav1alpha1.AlluxioRuntime{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							alluxioS3HighConcurrencyProfileAnnotation: "true",
+						},
+					},
+					Spec: datav1alpha1.AlluxioRuntimeSpec{
+						Properties: map[string]string{},
+					},
+				}
+				dataset := &datav1alpha1.Dataset{
+					Spec: datav1alpha1.DatasetSpec{
+						Mounts: []datav1alpha1.Mount{
+							{MountPoint: "s3://bucket/path"},
+						},
+					},
+				}
+				alluxioValue := &Alluxio{
+					Properties: map[string]string{},
+				}
+				userProperties := copyAlluxioProperties(runtime.Spec.Properties)
+
+				engine.optimizeDefaultProperties(runtime, alluxioValue)
+				engine.optimizeDefaultPropertiesForHighConcurrencyS3(runtime, dataset, alluxioValue, userProperties)
+
+				Expect(alluxioValue.Properties[testJnifuseKey]).To(Equal(testExpectedJnifuseFalse))
+				Expect(alluxioValue.Properties[testLibfuseVersionKey]).To(Equal("2"))
+				Expect(alluxioValue.Properties[testS3ThreadsMaxKey]).To(Equal("2048"))
+				Expect(alluxioValue.Properties[testWorkerClientPoolKey]).To(Equal("8192"))
+				Expect(alluxioValue.Properties[testBlockSizeKey]).To(Equal("64MB"))
+				Expect(alluxioValue.Properties[testStreamingChunkKey]).To(Equal("64MB"))
+				Expect(alluxioValue.Properties[testLocalChunkKey]).To(Equal("64MB"))
+				Expect(alluxioValue.Properties[testWorkerReaderKey]).To(Equal("64MB"))
+				Expect(alluxioValue.Properties[testDirectMemoryIOKey]).To(Equal("false"))
+			})
+		})
+
+		Context("when value properties share the runtime properties map", func() {
+			It("should still take precedence over generic defaults when called after them", func() {
+				runtime := &datav1alpha1.AlluxioRuntime{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							alluxioS3HighConcurrencyProfileAnnotation: "true",
+						},
+					},
+					Spec: datav1alpha1.AlluxioRuntimeSpec{
+						Properties: map[string]string{
+							"alluxio.user.file.writetype.default": "CACHE_THROUGH",
+						},
+					},
+				}
+				dataset := &datav1alpha1.Dataset{
+					Spec: datav1alpha1.DatasetSpec{
+						Mounts: []datav1alpha1.Mount{
+							{MountPoint: "s3://bucket/path"},
+						},
+					},
+				}
+				alluxioValue := &Alluxio{
+					Properties: runtime.Spec.Properties,
+				}
+				userProperties := copyAlluxioProperties(runtime.Spec.Properties)
+
+				engine.optimizeDefaultProperties(runtime, alluxioValue)
+				engine.optimizeDefaultPropertiesForHighConcurrencyS3(runtime, dataset, alluxioValue, userProperties)
+
+				Expect(alluxioValue.Properties[testJnifuseKey]).To(Equal(testExpectedJnifuseFalse))
+				Expect(alluxioValue.Properties[testLibfuseVersionKey]).To(Equal("2"))
+				Expect(alluxioValue.Properties[testBlockSizeKey]).To(Equal("64MB"))
+				Expect(alluxioValue.Properties[testDirectMemoryIOKey]).To(Equal("false"))
+			})
+		})
+
+		Context("when users override profile properties", func() {
+			It("should preserve the user supplied values", func() {
+				runtime := &datav1alpha1.AlluxioRuntime{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							alluxioS3HighConcurrencyProfileAnnotation: "true",
+						},
+					},
+					Spec: datav1alpha1.AlluxioRuntimeSpec{
+						Properties: map[string]string{
+							testS3ThreadsMaxKey:   "512",
+							testBlockSizeKey:      "128MB",
+							testDirectMemoryIOKey: "true",
+						},
+					},
+				}
+				dataset := &datav1alpha1.Dataset{
+					Spec: datav1alpha1.DatasetSpec{
+						Mounts: []datav1alpha1.Mount{
+							{MountPoint: "s3://bucket/path"},
+						},
+					},
+				}
+				alluxioValue := &Alluxio{
+					Properties: map[string]string{
+						testS3ThreadsMaxKey:   "512",
+						testBlockSizeKey:      "128MB",
+						testDirectMemoryIOKey: "true",
+					},
+				}
+				userProperties := copyAlluxioProperties(runtime.Spec.Properties)
+
+				engine.optimizeDefaultProperties(runtime, alluxioValue)
+				engine.optimizeDefaultPropertiesForHighConcurrencyS3(runtime, dataset, alluxioValue, userProperties)
+
+				Expect(alluxioValue.Properties[testS3ThreadsMaxKey]).To(Equal("512"))
+				Expect(alluxioValue.Properties[testBlockSizeKey]).To(Equal("128MB"))
+				Expect(alluxioValue.Properties[testDirectMemoryIOKey]).To(Equal("true"))
+			})
+		})
+
+		Context("when the profile is enabled on a non-S3 dataset", func() {
+			It("should not change defaults", func() {
+				runtime := &datav1alpha1.AlluxioRuntime{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							alluxioS3HighConcurrencyProfileAnnotation: "true",
+						},
+					},
+					Spec: datav1alpha1.AlluxioRuntimeSpec{
+						Properties: map[string]string{},
+					},
+				}
+				dataset := &datav1alpha1.Dataset{
+					Spec: datav1alpha1.DatasetSpec{
+						Mounts: []datav1alpha1.Mount{
+							{MountPoint: "https://example.com/data"},
+						},
+					},
+				}
+				alluxioValue := &Alluxio{
+					Properties: map[string]string{},
+				}
+				userProperties := copyAlluxioProperties(runtime.Spec.Properties)
+
+				engine.optimizeDefaultProperties(runtime, alluxioValue)
+				engine.optimizeDefaultPropertiesForHighConcurrencyS3(runtime, dataset, alluxioValue, userProperties)
+
+				Expect(alluxioValue.Properties[testJnifuseKey]).To(Equal(testExpectedJnifuseTrue))
+				Expect(alluxioValue.Properties[testBlockSizeKey]).To(Equal("16MB"))
+			})
+		})
+	})
+
+	Describe("normalizeFuseArgsForLibfuseVersion", func() {
+		Context("when libfuse2 is selected", func() {
+			It("should remove libfuse3-only max_idle_threads options", func() {
+				runtime := &datav1alpha1.AlluxioRuntime{
+					Spec: datav1alpha1.AlluxioRuntimeSpec{
+						Properties: map[string]string{
+							testLibfuseVersionKey: "2",
+						},
+					},
+				}
+				alluxioValue := &Alluxio{
+					Properties: map[string]string{},
+					Fuse: Fuse{
+						Args: []string{"fuse", "--fuse-opts=kernel_cache,rw,max_idle_threads=256,max_background=256"},
+					},
+				}
+
+				normalizeFuseArgsForLibfuseVersion(runtime, alluxioValue)
+
+				Expect(alluxioValue.Fuse.Args).To(Equal([]string{"fuse", "--fuse-opts=kernel_cache,rw,max_background=256"}))
+			})
+		})
+
+		Context("when libfuse3 is selected", func() {
+			It("should preserve max_idle_threads options", func() {
+				runtime := &datav1alpha1.AlluxioRuntime{
+					Spec: datav1alpha1.AlluxioRuntimeSpec{
+						Properties: map[string]string{
+							testLibfuseVersionKey: "3",
+						},
+					},
+				}
+				alluxioValue := &Alluxio{
+					Properties: map[string]string{},
+					Fuse: Fuse{
+						Args: []string{"fuse", "--fuse-opts=kernel_cache,rw,max_idle_threads=256"},
+					},
+				}
+
+				normalizeFuseArgsForLibfuseVersion(runtime, alluxioValue)
+
+				Expect(alluxioValue.Fuse.Args).To(Equal([]string{"fuse", "--fuse-opts=kernel_cache,rw,max_idle_threads=256"}))
 			})
 		})
 	})

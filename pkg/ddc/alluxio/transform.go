@@ -93,13 +93,20 @@ func (e *AlluxioEngine) transform(runtime *datav1alpha1.AlluxioRuntime) (value *
 	// 7.transform the permission
 	e.transformPermission(runtime, value)
 
+	userProperties := copyAlluxioProperties(runtime.Spec.Properties)
+
 	// 8.set optimization parameters
 	e.optimizeDefaultProperties(runtime, value)
 
-	// 9. set optimization parameters if all the mounts are HTTP
+	// 9. set optimization parameters for explicitly enabled high-concurrency S3 workloads
+	e.optimizeDefaultPropertiesForHighConcurrencyS3(runtime, dataset, value, userProperties)
+
+	// 10. set optimization parameters if all the mounts are HTTP
 	e.optimizeDefaultPropertiesAndFuseForHTTP(runtime, dataset, value)
 
-	// 10.allocate port for fluid engine
+	normalizeFuseArgsForLibfuseVersion(runtime, value)
+
+	// 11.allocate port for fluid engine
 	if datav1alpha1.IsHostNetwork(runtime.Spec.Master.NetworkMode) ||
 		datav1alpha1.IsHostNetwork(runtime.Spec.Worker.NetworkMode) {
 		e.Log.Info("allocatePorts for hostnetwork mode")
@@ -112,13 +119,13 @@ func (e *AlluxioEngine) transform(runtime *datav1alpha1.AlluxioRuntime) (value *
 		e.generateStaticPorts(value)
 	}
 
-	// 11.set engine properties
+	// 12.set engine properties
 	e.setPortProperties(runtime, value)
 
-	// 12.set API Gateway
+	// 13.set API Gateway
 	err = e.transformAPIGateway(runtime, value)
 
-	// 13.set the placementMode
+	// 14.set the placementMode
 	e.transformPlacementMode(dataset, value)
 	return
 }

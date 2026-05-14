@@ -26,6 +26,10 @@ import (
 	v1 "k8s.io/api/core/v1"
 )
 
+const (
+	alluxioS3HighConcurrencyProfileAnnotation = "runtime.fluid.io/alluxio.s3.high-concurrency-profile"
+)
+
 // transform dataset which has ufsPaths and ufsVolumes
 func (e *AlluxioEngine) optimizeDefaultProperties(runtime *datav1alpha1.AlluxioRuntime, value *Alluxio) {
 	if len(value.Properties) == 0 {
@@ -115,6 +119,108 @@ func (e *AlluxioEngine) optimizeDefaultProperties(runtime *datav1alpha1.AlluxioR
 			setDefaultProperties(runtime, value, "alluxio.user.direct.memory.io.enabled", "true")
 		}
 	}
+}
+
+func (e *AlluxioEngine) optimizeDefaultPropertiesForHighConcurrencyS3(runtime *datav1alpha1.AlluxioRuntime, dataset *datav1alpha1.Dataset, value *Alluxio, userProperties map[string]string) {
+	if !isS3HighConcurrencyProfileEnabled(runtime, dataset) {
+		return
+	}
+
+	setProfileDefaultProperty(userProperties, value, "alluxio.fuse.jnifuse.enabled", "false")
+	setProfileDefaultProperty(userProperties, value, "alluxio.fuse.jnifuse.libfuse.version", "2")
+	setProfileDefaultProperty(userProperties, value, "alluxio.underfs.s3.threads.max", "2048")
+	setProfileDefaultProperty(userProperties, value, "alluxio.user.block.worker.client.pool.max", "8192")
+	setProfileDefaultProperty(userProperties, value, "alluxio.user.block.size.bytes.default", "64MB")
+	setProfileDefaultProperty(userProperties, value, "alluxio.user.streaming.reader.chunk.size.bytes", "64MB")
+	setProfileDefaultProperty(userProperties, value, "alluxio.user.local.reader.chunk.size.bytes", "64MB")
+	setProfileDefaultProperty(userProperties, value, "alluxio.worker.network.reader.buffer.size", "64MB")
+	setProfileDefaultProperty(userProperties, value, "alluxio.user.direct.memory.io.enabled", "false")
+}
+
+func isS3HighConcurrencyProfileEnabled(runtime *datav1alpha1.AlluxioRuntime, dataset *datav1alpha1.Dataset) bool {
+	if runtime == nil || dataset == nil || !datasetHasS3Mount(dataset) {
+		return false
+	}
+
+	enabled, err := strconv.ParseBool(runtime.Annotations[alluxioS3HighConcurrencyProfileAnnotation])
+	return err == nil && enabled
+}
+
+func datasetHasS3Mount(dataset *datav1alpha1.Dataset) bool {
+	if dataset == nil {
+		return false
+	}
+
+	for _, mount := range dataset.Spec.Mounts {
+		mountPoint := strings.ToLower(mount.MountPoint)
+		if strings.HasPrefix(mountPoint, "s3://") || strings.HasPrefix(mountPoint, "s3a://") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func normalizeFuseArgsForLibfuseVersion(runtime *datav1alpha1.AlluxioRuntime, value *Alluxio) {
+	if getEffectiveAlluxioProperty(runtime, value, "alluxio.fuse.jnifuse.libfuse.version") != "2" {
+		return
+	}
+
+	removeFuseOption(value, "max_idle_threads")
+}
+
+func getEffectiveAlluxioProperty(runtime *datav1alpha1.AlluxioRuntime, value *Alluxio, key string) string {
+	if runtime != nil {
+		if value, found := runtime.Spec.Properties[key]; found {
+			return value
+		}
+	}
+	if value != nil {
+		return value.Properties[key]
+	}
+	return ""
+}
+
+func removeFuseOption(value *Alluxio, optionPrefix string) {
+	if value == nil || len(value.Fuse.Args) < 2 {
+		return
+	}
+
+	for i, arg := range value.Fuse.Args {
+		if !strings.HasPrefix(arg, "--fuse-opts=") {
+			continue
+		}
+
+		options := strings.Split(strings.TrimPrefix(arg, "--fuse-opts="), ",")
+		filteredOptions := options[:0]
+		for _, option := range options {
+			if strings.HasPrefix(option, optionPrefix+"=") {
+				continue
+			}
+			filteredOptions = append(filteredOptions, option)
+		}
+		value.Fuse.Args[i] = "--fuse-opts=" + strings.Join(filteredOptions, ",")
+	}
+}
+
+func setProfileDefaultProperty(userProperties map[string]string, alluxioValue *Alluxio, key string, value string) {
+	if alluxioValue == nil {
+		return
+	}
+	if alluxioValue.Properties == nil {
+		alluxioValue.Properties = map[string]string{}
+	}
+	if _, found := userProperties[key]; !found {
+		alluxioValue.Properties[key] = value
+	}
+}
+
+func copyAlluxioProperties(properties map[string]string) map[string]string {
+	copied := map[string]string{}
+	for key, value := range properties {
+		copied[key] = value
+	}
+	return copied
 }
 
 // optimizeDefaultPropertiesAndFuseForHTTP sets the default value for properties and fuse when the mounts are all HTTP.
